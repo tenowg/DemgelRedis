@@ -41,8 +41,12 @@ namespace DemgelRedis.ObjectManager.Proxy.ListInterceptor
             }
             else
             {
-                _commonData.RedisObjectManager.RedisBackup?.RemoveListItem(listKey, (RedisValue)original);
-                _commonData.RedisDatabase.ListRemove(listKey.RedisKey, (RedisValue)original, 1);
+                RedisValue value;
+                if (_commonData.RedisObjectManager.TryConvertToRedisValue(original, out value))
+                {
+                    _commonData.RedisObjectManager.RedisBackup?.RemoveListItem(listKey, value);
+                    _commonData.RedisDatabase.ListRemove(listKey.RedisKey, value, 1);
+                }
             }
 
             invocation.Proceed();

@@ -3,16 +3,11 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
-using System.Threading.Tasks;
-using DemgelRedis.BackingManager;
 using DemgelRedis.Common;
 using DemgelRedis.ObjectManager;
 using NUnit.Framework;
 using StackExchange.Redis;
 using DemgelRedis.Extensions;
-using DemgelRedis.Interfaces;
-using DemgelRedis.ObjectManager.Attributes;
-using Microsoft.WindowsAzure.Storage;
 
 namespace DemgelRedis.Tests
 {
@@ -22,13 +17,17 @@ namespace DemgelRedis.Tests
         private readonly RedisObjectManager _redis =
             new RedisObjectManager(/*new TableRedisBackup(CloudStorageAccount.DevelopmentStorageAccount)*/);
         private readonly IConnectionMultiplexer _connection = ConnectionMultiplexer.Connect(Environment.GetEnvironmentVariable("REDIS"));
+        private IDatabase _database
+        {
+            get
+            {
+                return _connection.GetDatabase(2);
+            }
+        }
 
         [Test]
-        [Ignore("don't run")]
         public void TestConvertToRedisHash()
         {
-            //var demgelRedis = new DemgelRedis();
-
             var test = new TestClass
             {
                 TestGuid = Guid.NewGuid(),
@@ -37,11 +36,10 @@ namespace DemgelRedis.Tests
 
             var ret = _redis.ConvertToRedisHash(test).ToList();
 
-            Assert.IsTrue(ret.Count == 7);
+            Assert.IsTrue(ret.Count >= 5);
         }
 
         [Test]
-        [Ignore("don't run")]
         public void TestRedisHashToObject()
         {
             var hashList = new List<HashEntry>
@@ -58,170 +56,181 @@ namespace DemgelRedis.Tests
 
             Assert.IsInstanceOf<TestClass>(ret);
             Assert.IsInstanceOf<Guid>(((TestClass)ret).TestGuid);
-            Assert.AreEqual(((TestClass) ret).TestString, "SomeTest");
+            Assert.AreEqual(((TestClass)ret).TestString, "SomeTest");
         }
 
         [Test]
-        [Ignore("Can't reliably test on remote CI server")]
         public void TestRedisRetrieveObject()
         {
-            //var connection = ConnectionMultiplexer.Connect(Environment.GetEnvironmentVariable("REDIS"));
+            var test1 = _redis.RetrieveObjectProxy<TestConvertClassSubSuffix2>("12345", _database);
+            test1.subTest.TestInitite.test = "test string - new";
 
-            var test3 = _redis.RetrieveObjectProxy<TestConvertClassSubSuffix2>("12345", _connection.GetDatabase());
-            //var t = test3.subTest;
+            var test2 = _redis.RetrieveObjectProxy<TestConvertClassSubSuffix2>("12345", _database);
+            Debug.WriteLine($"Id {test2.subTest.Id} - Test Value: {test2.subTest.TestInitite.test}");
 
-            Debug.WriteLine("Something " + test3.subTest.Id + " - " + test3.subTest.test);
+            test2.subTest = new TestConvertClassSub { test = "test string" };
+            test2.subTest.TestInitite.test = "test string";
 
-            //test3.subTest = new TestConvertClassSub() {Id = "someid5", test = "something68"};
-            test3.subTest.TestInitite.test = "do this again - and again";
-            //test3.subTest.TestInitite = new TestConvertClassSubSuffix {Id = "Testing", test = "Test"};
-            //test3.subTest.TestInitite.subTest = test3.subTest;
+            Assert.IsTrue(test2.Id == "12345");
+            Assert.IsTrue(test2.subTest.TestInitite.test == "test string");
 
-            Assert.IsTrue(test3 != null);
+            Assert.IsTrue(test1 != null);
         }
 
         [Test]
-        [Ignore("don't run")]
-        public void AllNewTests()
+        public void ReplaceRedisObjectProperty()
         {
-            var test = _redis.RetrieveObjectProxy<RedisUser>("3", _connection.GetDatabase());
-            //var t = test.DisplayName;
-            test.DisplayName = "New Name2";
+            var subTest = new TestConvertClassSub { test = "original" };
+            var mainTest = new TestConvertClassSubSuffix { subTest = subTest };
+            var test1 = _redis.RetrieveObjectProxy("testReplace", _database, mainTest);
+            test1.subTest = subTest;
 
-            Debug.WriteLine(test.DisplayName);
-        }
-
-
-        public class SubscriptionLookups : IRedisObject
-        {
-            [RedisIdKey]
-            public virtual string Id { get; set; } = "subscriptionlookupTest";
-            [RedisDeleteCascade(Cascade = false)]
-            public virtual IDictionary<RedisValue, Subscription> Slugs { get; set; } = new Dictionary<RedisValue, Subscription>();
-            [RedisDeleteCascade(Cascade = false)]
-            public virtual IDictionary<RedisValue, TestNull> Modules { get; set; } = new Dictionary<RedisValue, TestNull>();
-        }
-
-        public class TestNull : IRedisObject
-        {
-            [RedisIdKey]
-            public virtual string Id { get; set; }
-            public virtual string SomeNullValue { get; set; } 
+            // TODO finish this test
         }
 
         [Test]
-        //[Ignore("Can't reliably test on CI remote server.")]
-        public void TestRedisListTests()
+        public void TestRedisListSupport()
         {
-            var test4 = _redis.RetrieveObjectProxy<SubscriptionLookups>(_connection.GetDatabase());
-            var watch = Stopwatch.StartNew();
+            var test1 = _redis.RetrieveObjectProxy<TestConvertClassSubSuffix>("testList", _database);
+            test1.SomeIntegers.Add(new TestConvertClass2 { TestValue = "testItem1" });
+            test1.SomeStrings.Add("hello");
+            test1.NewSomeStrings.Add("test if cast to string works");
 
-            var tt = test4.Modules.FullDictionary();
-            var ttt = tt["test"].SomeNullValue;
+            var test2 = _redis.RetrieveObjectProxy<TestConvertClassSubSuffix>("testList", _database);
+            test2.SomeIntegers.FullList();
+            test2.SomeIntegers[0].TestNonVirtualValue = "test";
+            test2.SomeIntegers[0].TestValue = "testChangeValue";
+            test2.NewSomeStrings.FullList();
 
-            tt.Add("test1", new TestNull());
+            Assert.IsTrue(test2.SomeIntegers[0].TestValue == "testChangeValue");
+            test2.SomeIntegers.Remove(test2.SomeIntegers[0]);
+            test2.SomeStrings.Remove("hello");
 
-            //Debug.WriteLine($"There are {test4.Subscriptions.FullCount()} in this list.");
-            //foreach (var t in test4.Subscriptions.Limit(3, 50))
-            //{
-            //    if (t.Founder == null)
-            //    {
-            //        t.Founder = test4;
-
-            //    }
-            //    Debug.WriteLine(t.Id + " --- " + t.Name + " --- " + t.Founder?.Id);
-
-            //    foreach (var dict in t.Members.Limit(0, 10))
-            //    {
-            //        Debug.WriteLine("    THERE WAS A USER: " + dict.Value.DisplayName);
-            //    }
-            //}
-            //Debug.Write("New Time is: " + watch.ElapsedMilliseconds);
-            //test4.Subscriptions[4].Name = "Some new Name";
-            //var watch2 = Stopwatch.StartNew();
-            //var test5 = _redis.RetrieveObjectProxy<RedisUser>("3", _connection.GetDatabase());
-            //foreach (var t in test5.Subscriptions)
-            //{
-            //    if (t.Founder == null)
-            //    {
-            //        t.Founder = test4;
-            //    }
-            //    Debug.WriteLine(t.Name + " --- " + t.Founder?.Id);
-            //}
-            //Debug.Write("New Time is: " + watch2.ElapsedMilliseconds);
-
-            //var i = test4.Subscriptions[2];
-            //test4.Subscriptions.Remove(i);
-            //test3.SomeIntegers.Add(new TestConvertClass2());
-            ////var hello = test3.SomeIntegers[0];
-            //var testClass = new TestConvertClass2 {TestValue = "Blah Blah Blah"};
-            //test3.SomeIntegers.Add(testClass);
-            //var newsub = new Subscription() {Name = "test Name"};
-            //var newsub = _redis.RetrieveObjectProxy<Subscription>(_connection.GetDatabase());
-            ////newsub.Id = "105";
-            //newsub.Name = "hello";
-            //newsub.Founder = test4;
-            //test4.Subscriptions.Add(newsub);
-            //newsub.Members.Add(test4.Id, test4);
-
-
-            //test3.test = "This should be changed to this new value...";
+            test2.DeleteRedisObject();
         }
 
         [Test]
-        [Ignore("dont run")]
         public void TestRedisKey()
         {
-            var type = typeof (TestConvertClassSubSuffix);
+            var type = typeof(TestConvertClassSubSuffix);
             var key = new RedisKeyObject(type, "123");
 
             var propertyType = type.GetProperties().SingleOrDefault(x => x.Name == "SomeStrings");
             var key2 = new RedisKeyObject(propertyType, "123");
+
+            var key3 = new RedisKeyObject(key.RedisKey);
+            var key4 = new RedisKeyObject("123");
 
             Assert.IsTrue(key2.RedisKey.Equals("TestConvertClassSubSuffix:123:SomeStrings"));
             Assert.IsTrue(key.RedisKey.Equals("TestConvertClassSubSuffix:123"));
         }
 
         [Test]
-        [Ignore("don't run")]
         public void TestDictionarySupport()
         {
-            var testDictObject = _redis.RetrieveObjectProxy<TestDictionaryClass>("12345737", _connection.GetDatabase());
+            var testDictObject = _redis.RetrieveObjectProxy<TestDictionaryClass>("testDictionary", _database);
 
-            //testDictObject.TestDictionary.Remove("hello");
+            testDictObject.TestDictionaryWithInt.Add(15, "test");
+            var tt = testDictObject.TestDictionaryWithInt[15];
 
-            if (!testDictObject.TestDictionaryWithInt.KeyExists(15))
-            {
-                testDictObject.TestDictionaryWithInt.Add(15, "test");
-            }
-            else
-            {
-                testDictObject.TestDictionaryWithInt[15] = "test";
-            }
-            var t = testDictObject.TestDictionaryWithInt.FullDictionary();
-            //Debug.WriteLine(t["hello"]);
+            Assert.IsTrue(testDictObject.TestDictionaryWithInt.KeyExists(15));
 
-            testDictObject.TestDictionaryWithInt.Remove(15);
+            var newTestDictObject = _redis.RetrieveObjectProxy<TestDictionaryClass>("testDictionary", _database);
+            var t = newTestDictObject.TestDictionaryWithInt.FullDictionary();
+
+            var newTestDictObjectGet = _redis.RetrieveObjectProxy<TestDictionaryClass>("testDictionary", _database);
+            var ttt = newTestDictObjectGet.TestDictionaryWithInt[15];
+
+            Assert.IsTrue(newTestDictObject.TestDictionaryWithInt.ContainsKey(15));
+
+            newTestDictObject.TestDictionaryWithInt.Remove(15);
+            Assert.IsFalse(newTestDictObject.TestDictionaryWithInt.KeyExists(15));
         }
 
         [Test]
-        [Ignore("don't run")]
         public void TestSetSupport()
         {
-            var testSet = _redis.RetrieveObjectProxy<TestSetOpertions>("666", _connection.GetDatabase());
+            // Populate with Data
+            var testSet = _redis.RetrieveObjectProxy<TestSetOpertions>("666", _database);
+            testSet.TestSet.Add(new TestSet { Id = "667", SomeDate = DateTime.UtcNow, SomeString = "testString2" });
+            testSet.TestSet.Add(new TestSet { Id = "668", SomeDate = DateTime.UtcNow + TimeSpan.FromMinutes(10), SomeString = "testString3" });
+            testSet.TestSet.Add(new TestSet { Id = "669", SomeDate = DateTime.UtcNow + TimeSpan.FromMinutes(15), SomeString = "testString4" });
+            testSet.TestSet.Add(new TestSet { Id = "670", SomeDate = DateTime.UtcNow + TimeSpan.FromMinutes(20), SomeString = "testString5" });
+            testSet.TestSet.Add(new TestSet { Id = "671", SomeDate = DateTime.UtcNow + TimeSpan.FromMinutes(25), SomeString = "testString6" });
+            testSet.TestSet.Add(new TestSet { Id = "672", SomeDate = DateTime.UtcNow + TimeSpan.FromMinutes(30), SomeString = "testString7" });
 
-            var t = testSet.TestSet.Limit(DateTime.MinValue, DateTime.MaxValue, 4, 2);
+            var testSet2 = _redis.RetrieveObjectProxy<TestSetOpertions>("666", _database);
+            testSet2.TestSet.Limit(DateTime.MinValue, DateTime.MaxValue, 4, 2);
 
-            //var ttt = new TestSet {Id = "667", SomeDate = DateTime.Now + TimeSpan.FromDays(2), SomeString = "testString2"};
-            //t.Add(new TestSet { Id = "667", SomeDate = DateTime.UtcNow, SomeString = "testString2" });
-            //t.Add(new TestSet { Id = "668", SomeDate = DateTime.UtcNow, SomeString = "testString2" });
-            //t.Add(new TestSet { Id = "669", SomeDate = DateTime.UtcNow, SomeString = "testString2" });
-            //t.Add(new TestSet { Id = "670", SomeDate = DateTime.UtcNow, SomeString = "testString2" });
-            //t.Add(new TestSet { Id = "671", SomeDate = DateTime.UtcNow, SomeString = "testString2" });
-            //t.Add(new TestSet { Id = "672", SomeDate = DateTime.UtcNow, SomeString = "testString2" });
-            //t.First().SomeDate = DateTime.Now;
+            Assert.IsTrue(testSet2.TestSet.Count == 4);
 
-            //t.Remove(ttt);
+            testSet2.TestSet.Remove(testSet2.TestSet.First());
+            testSet2.TestSet.Remove(testSet2.TestSet.First());
+
+            Assert.IsTrue(testSet2.TestSet.Count == 2);
+
+            var testSet3 = _redis.RetrieveObjectProxy<TestSetOpertions>("666", _database);
+            testSet3.TestSet.Limit(DateTime.MinValue, DateTime.MaxValue, 6, 0);
+
+            Assert.IsTrue(testSet3.TestSet.Count == 4);
+        }
+
+        [Test]
+        public void TestGetDictionary()
+        {
+            var testDictionary = _redis.RetrieveObjectProxy<TestDictionaryClass>("123", _database);
+            testDictionary.TestDictionary.Add("testKey", "testValue");
+            testDictionary.TestingInterface.Add("testKey", new TestInterface { test = "test" });
+
+            var testDictionary2 = _redis.RetrieveObjectProxy<TestDictionaryClass>("123", _database);
+            var test = testDictionary2.TestingInterface["testKey"];
+            var t = testDictionary2.TestDictionary["testKey"];
+
+            var testFull = testDictionary2.TestDictionary.FullDictionary();
+
+            Assert.IsTrue(test.test == "test");
+            Assert.IsTrue(testFull.Count > 0);
+        }
+
+        [Test]
+        public void TestTryGetValueDictionary()
+        {
+            var testDictionary = _redis.RetrieveObjectProxy<TestDictionaryClass>("tryGetTest", _database);
+            testDictionary.TestDictionary.Add("testKey", "testValue");
+
+            var testDictionary2 = _redis.RetrieveObjectProxy<TestDictionaryClass>("tryGetTest", _database);
+            RedisValue value;
+            var test = testDictionary2.TestDictionary.TryGetValue("testKey", out value);
+            RedisValue failValue;
+            var t = testDictionary2.TestDictionary.TryGetValue("testFailKey", out failValue);
+
+            Assert.IsTrue(test);
+            Assert.IsFalse(t);
+
+            Assert.IsTrue(value == "testValue");
+        }
+
+        [Test]
+        public void TestDeleteObject()
+        {
+            // Make an Object
+            var testObject = _redis.RetrieveObjectProxy<TestConvertClassSubSuffix2>("testObjectDelete", _database);
+            testObject.subTest = new TestConvertClassSub { Id = "idtocheck", test = "This should not get deleted" };
+            testObject.DeleteRedisObject();
+
+            var checkIfExists = _redis.RetrieveObjectProxy<TestConvertClassSub>("idtocheck", _database);
+            Assert.IsTrue(checkIfExists.test == "This should not get deleted");
+        }
+
+        [Test]
+        public void TestInterfaces()
+        {
+            var testObject = _redis.RetrieveObjectProxy<TestInterfaceClass>("testObjectDelete", _database);
+            testObject.Interface = new TestInterface { test = "test" };
+
+            var testObject2 = _redis.RetrieveObjectProxy<TestInterfaceClass>("testObjectDelete", _database);
+            var t = testObject2.Interface;
+            var tt = t.test;
         }
     }
 }

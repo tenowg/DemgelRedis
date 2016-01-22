@@ -4,6 +4,8 @@ using DemgelRedis.Common;
 using DemgelRedis.Extensions;
 using DemgelRedis.Interfaces;
 using StackExchange.Redis;
+using Castle.Core.Internal;
+using DemgelRedis.ObjectManager.Attributes;
 
 namespace DemgelRedis.ObjectManager.Proxy.RedisObjectInterceptor
 {
@@ -37,21 +39,46 @@ namespace DemgelRedis.ObjectManager.Proxy.RedisObjectInterceptor
                     redisObject = proxy as IRedisObject;
                 }
 
-                if (!_commonData.Processed )
-                { 
-                    invocation.Proceed();
-                    return;
+                // Check to see if there is an ID set in the database (if not it has never been saved)
+
+                if (!_commonData.Processed)
+                {
+                    if (_commonData.RedisDatabase.KeyExists(key.RedisKey))
+                    {
+                        invocation.Proceed();
+                        return;
+                    }
                 }
-                //var objectKey = new RedisKeyObject(invocation.InvocationTarget.GetType(), _commonData.Id);
-                // FIX THIS...
+
                 var property =
                     invocation.Method.ReflectedType?.GetProperties()
                         .SingleOrDefault(x => x.SetMethod != null && x.SetMethod.Name == invocation.Method.Name);
 
                 if (property != null)
                 {
-                    _commonData.RedisObjectManager.RedisBackup?.UpdateHashValue(
-                        new HashEntry(property.Name, key.RedisKey), objectKey);
+                    bool deleteCascade = true;
+                    // Need to check if the item is currently set (ie are we replacing a value)
+                    if (property.HasAttribute<RedisDeleteCascade>())
+                    {
+                        deleteCascade = property.GetAttribute<RedisDeleteCascade>().Cascade;
+                    }
+
+                    if (deleteCascade)
+                    {
+                        object currentValue = property.GetValue(invocation.Proxy);
+                        if (currentValue is IRedisObject)
+                        {
+                            RedisKeyObject originalKey = new RedisKeyObject(currentValue.GetType(), string.Empty);
+                            _commonData.RedisDatabase.GenerateId(originalKey, currentValue, _commonData.RedisObjectManager.RedisBackup);
+
+                            if (originalKey != key)
+                            {
+                                ((IRedisObject)currentValue).DeleteRedisObject();
+                            }
+                        }
+                    }
+                    // Need to check is there is a RedisDeleteCascade on property
+                    _commonData.RedisObjectManager.RedisBackup?.UpdateHashValue(new HashEntry(property.Name, key.RedisKey), objectKey);
 
                     _commonData.RedisDatabase.HashSet(objectKey.RedisKey, property.Name, key.RedisKey);
                     _commonData.RedisObjectManager.SaveObject(redisObject, key.Id, _commonData.RedisDatabase);
@@ -61,16 +88,17 @@ namespace DemgelRedis.ObjectManager.Proxy.RedisObjectInterceptor
             {
                 if (!_commonData.Processed)
                 {
-                    if (_commonData.Processing)
+                    if (!_commonData.Processing)
                     {
-                        invocation.Proceed();
-                        return;
+                        //invocation.Proceed();
+                        //return;
+
+                        _commonData.Processing = true;
+                        // Process the proxy (do a retrieveObject)
+                        _commonData.RedisObjectManager.RetrieveObject(invocation.Proxy, _commonData.Id, _commonData.RedisDatabase, null);
+                        _commonData.Processed = true;
+                        _commonData.Processing = false;
                     }
-                    _commonData.Processing = true;
-                    // Process the proxy (do a retrieveObject)
-                    _commonData.RedisObjectManager.RetrieveObject(invocation.Proxy, _commonData.Id, _commonData.RedisDatabase, null);
-                    _commonData.Processed = true;
-                    _commonData.Processing = false;
                 }
                 // Set the individual item
                 var property =
@@ -82,10 +110,15 @@ namespace DemgelRedis.ObjectManager.Proxy.RedisObjectInterceptor
                 {
                     var ret = new HashEntry(property.Name, converter.ToWrite(invocation.Arguments[0]));
 
-                    _commonData.RedisObjectManager.RedisBackup?.RestoreHash(_commonData.RedisDatabase, objectKey);
-                    _commonData.RedisObjectManager.RedisBackup?.UpdateHashValue(ret, objectKey);
+                    //Need to check if the value already stored is different
 
-                    _commonData.RedisDatabase.HashSet(objectKey.RedisKey, ret.Name, ret.Value);
+                    _commonData.RedisObjectManager.RedisBackup?.RestoreHash(_commonData.RedisDatabase, objectKey);
+
+                    if (_commonData.RedisDatabase.HashGet(objectKey.RedisKey, ret.Name) != ret.Value)
+                    {
+                        _commonData.RedisObjectManager.RedisBackup?.UpdateHashValue(ret, objectKey);
+                        _commonData.RedisDatabase.HashSet(objectKey.RedisKey, ret.Name, ret.Value);
+                    }
                 }
             }
             invocation.Proceed();

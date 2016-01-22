@@ -60,9 +60,9 @@ namespace DemgelRedis.ObjectManager
                 {
                     var redisObject = prop.GetValue(o, null);
                     var redisIdAttr =
-                        redisObject.GetType().GetProperties().SingleOrDefault(
+                        redisObject?.GetType().GetProperties().SingleOrDefault(
                             x => x.HasAttribute<RedisIdKey>()) ??
-                        redisObject.GetType().BaseType?.GetProperties().SingleOrDefault(
+                        redisObject?.GetType().BaseType?.GetProperties().SingleOrDefault(
                                 x => x.HasAttribute<RedisIdKey>());
 
                     if (redisIdAttr != null)
@@ -86,9 +86,6 @@ namespace DemgelRedis.ObjectManager
                 }
                 else
                 {
-                    //ITypeConverter converter;
-                    //if (!TypeConverters.TryGetValue(type, out converter)) continue;
-                    //var obj = ConvertToRedisValue(prop.GetValue(o, null));
                     RedisValue obj;
                     entry = TryConvertToRedisValue(prop.GetValue(o, null), out obj) 
                         ? new HashEntry(prop.Name, obj) 
@@ -121,9 +118,6 @@ namespace DemgelRedis.ObjectManager
                 object value;
                 if (TryConvertFromRedisValue(type, hashPair, out value))
                 {
-                    //ITypeConverter converter;
-                    //if (!TypeConverters.TryGetValue(type, out converter)) continue;
-                    //var value = converter.OnRead(hashPair);
                     prop.SetValue(obj, value);
                 }
             }
@@ -153,34 +147,48 @@ namespace DemgelRedis.ObjectManager
         /// <param name="id">The id of the object to find</param>
         /// <param name="redisDatabase"></param>
         /// <returns></returns>
-        public T RetrieveObjectProxy<T>(string id, IDatabase redisDatabase)
+        public T RetrieveObjectProxy<T>(string id, IDatabase redisDatabase, T baseObject)
             where T : class, new()
         {
-            // We are going to start setting the ID here of the base Object
-            var obj = new T();
-
-            var prop = obj.GetType().GetProperties().SingleOrDefault(p => p.HasAttribute<RedisIdKey>());
+            var prop = baseObject.GetType().GetProperties().SingleOrDefault(p => p.HasAttribute<RedisIdKey>());
 
             if (prop == null)
             {
                 throw new Exception("RedisIDkey Attribute is required on one property");
             }
 
-            if (prop.PropertyType.IsAssignableFrom(typeof (Guid)))
+            if (prop.PropertyType.IsAssignableFrom(typeof(Guid)))
             {
-                prop.SetValue(obj, Guid.Parse(id));
+                prop.SetValue(baseObject, Guid.Parse(id));
             }
-            else if (prop.PropertyType.IsAssignableFrom(typeof (string)))
+            else if (prop.PropertyType.IsAssignableFrom(typeof(string)))
             {
-                prop.SetValue(obj, id);
+                prop.SetValue(baseObject, id);
             }
             else
             {
                 throw new Exception("Id can only be of type String or Guid");
             }
+            var proxy = RetrieveObjectProxy(typeof(T), id, redisDatabase, baseObject);
 
-            var proxy = RetrieveObjectProxy(typeof(T), id, redisDatabase, obj);            
             return proxy as T;
+        }
+
+        public T RetrieveObjectProxy<T>(string id, IDatabase redisDatabase)
+            where T : class, new()
+        {
+            var obj = new T();
+
+            return RetrieveObjectProxy(id, redisDatabase, obj);
+        }
+
+        public T RetrieveObjectProxy<T>(IDatabase redisDatabase, T baseObject)
+            where T : class, new()
+        {
+            var key = new RedisKeyObject(typeof(T), string.Empty);
+            redisDatabase.GenerateId(key, baseObject, RedisBackup);
+
+            return RetrieveObjectProxy(key.Id, redisDatabase, baseObject);
         }
 
         protected internal object RetrieveObjectProxy(Type type, string id, IDatabase redisDatabase, object obj, object parentProxy = null)
@@ -290,6 +298,49 @@ namespace DemgelRedis.ObjectManager
 
             convertedValue = converter.OnRead(value);
             return true;
+        }
+
+        public object GetRedisObjectWithType(IDatabase redisDatabase, RedisKey redisKey, string id)
+        {
+            var key = new RedisKeyObject(redisKey);
+            RedisBackup?.RestoreHash(redisDatabase, key);
+
+            if (!redisDatabase.KeyExists(redisKey))
+            {
+                return null;
+            }
+
+            var typeHash = redisDatabase.HashGet(redisKey, "Type");
+            if (typeHash.IsNullOrEmpty) return null;
+
+            Type finalItemType = null;
+            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies()) { 
+                finalItemType = Type.GetType(typeHash + "," + assembly.FullName);
+                if (finalItemType != null) break;
+            }
+
+            if (finalItemType == null)
+            {
+                throw new ArgumentException("Type value is saved incorrectly and will lead to corruption.");
+            }
+
+            var newObj = Activator.CreateInstance(finalItemType);
+            var keyProp = newObj.GetType().GetProperties().SingleOrDefault(x => x.HasAttribute<RedisIdKey>());
+            if (keyProp == null) throw new Exception("RedisObjects need to have a RedisIdKey property.");
+            if (keyProp.PropertyType.IsAssignableFrom(typeof(string)))
+            {
+                keyProp.SetValue(newObj, id);
+            }
+            else if (keyProp.PropertyType.IsAssignableFrom(typeof(Guid)))
+            {
+                keyProp.SetValue(newObj, Guid.Parse(id));
+            }
+            else
+            {
+                throw new Exception("RedisIdKey can only be of type String or Guid");
+            }
+
+            return RetrieveObjectProxy(finalItemType, id, redisDatabase, newObj);
         }
     }   
 }
